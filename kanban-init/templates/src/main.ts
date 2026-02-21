@@ -571,6 +571,9 @@ async function showTaskDetail(id: number) {
         ${testSection}
         ${agentLogSection}
       </div>
+      <div class="modal-danger-zone">
+        <button class="delete-task-btn" id="delete-task-btn">Delete Card</button>
+      </div>
     `;
 
     // Level change handler
@@ -583,6 +586,14 @@ async function showTaskDetail(id: number) {
         body: JSON.stringify({ level: newLevel }),
       });
       showTaskDetail(id);
+    });
+
+    // Delete task handler
+    document.getElementById("delete-task-btn")!.addEventListener("click", async () => {
+      if (!confirm(`Delete card #${task.id} "${task.title}"?`)) return;
+      await fetch(`/api/task/${id}`, { method: "DELETE" });
+      document.getElementById("modal-overlay")!.classList.add("hidden");
+      loadBoard();
     });
 
     // Requirements edit handlers

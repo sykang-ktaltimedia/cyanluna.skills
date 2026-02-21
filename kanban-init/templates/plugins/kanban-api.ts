@@ -761,6 +761,34 @@ export function kanbanApiPlugin(): Plugin {
           return;
         }
 
+        // DELETE /api/task/:id  (delete task)
+        if (req.url?.match(/^\/api\/task\/\d+$/) && req.method === "DELETE") {
+          const id = req.url.split("/").pop();
+          const db = getDb();
+          try {
+            // Delete associated attachment files
+            const task = db
+              .prepare("SELECT attachments FROM tasks WHERE id = ?")
+              .get(id) as { attachments: string | null } | undefined;
+            if (task?.attachments) {
+              try {
+                const atts = JSON.parse(task.attachments);
+                for (const a of atts) {
+                  try { fs.unlinkSync(a.path); } catch { /* ok */ }
+                }
+              } catch { /* ok */ }
+            }
+
+            db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } finally {
+            db.close();
+          }
+          return;
+        }
+
         // POST /api/task/:id/attachment  (upload image as base64)
         if (
           req.url?.match(/^\/api\/task\/\d+\/attachment$/) &&
