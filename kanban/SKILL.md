@@ -1,6 +1,6 @@
 ---
 name: kanban
-description: Manage project tasks in a local SQLite DB (.claude/kanban.db). Supports session context persistence, task CRUD, lifecycle documentation, and automated code review. Run with /kanban.
+description: Manage project tasks in a local SQLite DB (.claude/kanban.db). Supports 7-column AI team pipeline (Req → Plan → Review Plan → Impl → Review Impl → Test → Done), session context persistence, task CRUD, lifecycle documentation, and automated code review. Run with /kanban.
 license: MIT
 ---
 
@@ -29,9 +29,17 @@ CREATE TABLE IF NOT EXISTS tasks (
   implementation_notes TEXT,
   tags TEXT,
   review_comments TEXT,
+  plan_review_comments TEXT,
+  test_results TEXT,
+  agent_log TEXT,
+  current_agent TEXT,
+  plan_review_count INTEGER NOT NULL DEFAULT 0,
+  impl_review_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   started_at TEXT,
+  planned_at TEXT,
   reviewed_at TEXT,
+  tested_at TEXT,
   completed_at TEXT
 );
 ```
@@ -39,42 +47,146 @@ CREATE TABLE IF NOT EXISTS tasks (
 | Column | Type | Description |
 |--------|------|-------------|
 | `project` | TEXT | Project identifier. Uses `basename "$(pwd)"` |
-| `status` | TEXT | `todo` / `inprogress` / `review` / `done` |
+| `status` | TEXT | `todo` / `plan` / `plan_review` / `impl` / `impl_review` / `test` / `done` |
 | `priority` | TEXT | `high` / `medium` / `low` |
 | `description` | TEXT | **Requirements** in markdown - what needs to be done |
 | `plan` | TEXT | **Implementation plan** in markdown - how to do it |
 | `implementation_notes` | TEXT | **Implementation log** in markdown - what was actually done |
 | `tags` | TEXT | JSON array string (e.g., `'["api","ui","db"]'`) |
-| `review_comments` | TEXT | JSON array of review comment objects (see format below) |
+| `review_comments` | TEXT | JSON array of impl review comment objects |
+| `plan_review_comments` | TEXT | JSON array of plan review comment objects |
+| `test_results` | TEXT | JSON array of test result objects |
+| `agent_log` | TEXT | JSON array of agent activity log entries |
+| `current_agent` | TEXT | Currently active agent name |
+| `plan_review_count` | INTEGER | Number of plan review iterations |
+| `impl_review_count` | INTEGER | Number of impl review iterations |
 
-### Card Lifecycle (4 Phases)
+## 7-Column AI Team Pipeline
+
+```
+Req → Plan → Review Plan → Impl → Review Impl → Test → Done
+```
+
+| Column | Status | Agent | Model | Writes to |
+|--------|--------|-------|-------|-----------|
+| Req | `todo` | User | - | `description` |
+| Plan | `plan` | Plan Agent | opus (Task) | `plan` |
+| Review Plan | `plan_review` | Review Agent | gemini/codex/sonnet | `plan_review_comments` |
+| Impl | `impl` | Worker → TDD Tester (sequential) | opus → sonnet | `implementation_notes` |
+| Review Impl | `impl_review` | Code Review Agent | gemini/codex/sonnet | `review_comments` |
+| Test | `test` | Test Runner | sonnet (Task) | `test_results` |
+| Done | `done` | - | - | - |
+
+### Valid Status Transitions
+
+```
+todo        → plan
+plan        → plan_review, todo
+plan_review → impl (approve), plan (reject)
+impl        → impl_review
+impl_review → test (approve), impl (reject)
+test        → done (pass), impl (fail)
+done        → (terminal)
+```
+
+### Card Lifecycle (7 Phases)
 
 Each card captures the full workflow. Clicking a card in the web board shows all phases in a modal:
 
 ```
-Phase 1: Requirements  (description)           - What needs to be done
-Phase 2: Plan          (plan)                   - How to approach it
-Phase 3: Implementation (implementation_notes)  - What was actually changed
-Phase 4: Review        (review_comments)        - Verification results
+Phase 1: Requirements       (description)            - What needs to be done
+Phase 2: Plan                (plan)                   - How to approach it
+Phase 3: Plan Review         (plan_review_comments)   - Plan verification
+Phase 4: Implementation      (implementation_notes)   - What was actually changed
+Phase 5: Implementation Review (review_comments)      - Code review results
+Phase 6: Test                (test_results)            - Test execution results
+Phase 7: Done                                          - Completed
 ```
 
-### review_comments Format
+### Comment Formats
 
+#### review_comments / plan_review_comments Format
 ```json
 [
   {
-    "reviewer": "claude-review-agent",
+    "reviewer": "gemini",
     "status": "changes_requested",
-    "comment": "## Review Findings\n\n1. **Error handling**: Missing try-catch\n2. **Types**: Avoid using any",
+    "comment": "## Review Findings\n\n1. Missing error handling\n2. Type safety issues",
     "timestamp": "2026-02-20T14:30:00.000Z"
-  },
+  }
+]
+```
+
+#### test_results Format
+```json
+[
   {
-    "reviewer": "claude-review-agent",
-    "status": "approved",
-    "comment": "Fixes verified. Code quality is good.",
+    "tester": "test-runner-agent",
+    "status": "pass",
+    "lint": "0 errors, 0 warnings",
+    "build": "Build successful",
+    "tests": "42 passed, 0 failed",
+    "comment": "All checks passed",
     "timestamp": "2026-02-20T15:00:00.000Z"
   }
 ]
+```
+
+#### agent_log Format
+```json
+[
+  {
+    "agent": "plan-agent",
+    "message": "Started planning for task #5",
+    "timestamp": "2026-02-20T14:00:00.000Z"
+  }
+]
+```
+
+## DB Access — HTTP API Only
+
+**IMPORTANT**: All DB access MUST use the HTTP API endpoints served by the kanban-board dev server. Do NOT use `sqlite3` CLI directly.
+
+Base URL: `http://localhost:5173` (default kanban-board port)
+
+### API Endpoints
+
+```bash
+# Read task
+curl -s http://localhost:5173/api/task/$ID | jq .
+
+# Read board
+curl -s "http://localhost:5173/api/board?project=$PROJECT" | jq .
+
+# Update task (fields + status)
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d '{"plan": "...", "status": "plan_review"}'
+
+# Create task
+curl -s -X POST http://localhost:5173/api/task \
+  -H 'Content-Type: application/json' \
+  -d '{"title": "...", "project": "...", "priority": "medium", "description": "..."}'
+
+# Plan review result
+curl -s -X POST http://localhost:5173/api/task/$ID/plan-review \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer": "gemini", "status": "approved", "comment": "Plan looks good"}'
+
+# Impl review result
+curl -s -X POST http://localhost:5173/api/task/$ID/review \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer": "gemini", "status": "approved", "comment": "Code looks good"}'
+
+# Test result
+curl -s -X POST http://localhost:5173/api/task/$ID/test-result \
+  -H 'Content-Type: application/json' \
+  -d '{"tester": "test-runner", "status": "pass", "lint": "...", "build": "...", "tests": "...", "comment": "..."}'
+
+# Reorder / drag-and-drop
+curl -s -X PATCH http://localhost:5173/api/task/$ID/reorder \
+  -H 'Content-Type: application/json' \
+  -d '{"status": "plan", "afterId": null, "beforeId": null}'
 ```
 
 ## Project Name Detection
@@ -84,22 +196,14 @@ Uses the basename of the current working directory:
 basename "$(pwd)"
 ```
 
-## DB Path Resolution
-
-```bash
-DB_PATH="$(pwd)/.claude/kanban.db"
-mkdir -p "$(pwd)/.claude"
-```
-
 ## Commands
 
 ### View Board (Default)
 `/kanban` or `/kanban list`
 
-Run the query and output as a markdown table:
+Read the board via API and output as a markdown table:
 ```bash
-sqlite3 -header -column .claude/kanban.db \
-  "SELECT id, title, status, priority FROM tasks WHERE project='PROJECT' ORDER BY CASE status WHEN 'inprogress' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'done' THEN 3 END, id"
+BOARD=$(curl -s "http://localhost:5173/api/board?project=$PROJECT")
 ```
 
 Output format:
@@ -108,52 +212,51 @@ Output format:
 
 | ID | Status | Priority | Title |
 |----|--------|----------|-------|
-| 3  | In Progress | high | Category Rules UI |
-| 7  | Review | medium | API Error Handling |
-| 1  | To Do | medium | Monthly Budget |
-| 10 | Done | - | Expense Flag |
+| 3  | impl | high | Category Rules UI |
+| 7  | impl_review | medium | API Error Handling |
+| 1  | todo | medium | Monthly Budget |
+| 10 | done | - | Expense Flag |
+```
+
+If the kanban-board dev server is not running, fall back to sqlite3:
+```bash
+sqlite3 -header -column .claude/kanban.db \
+  "SELECT id, title, status, priority FROM tasks WHERE project='PROJECT' ORDER BY CASE status WHEN 'impl' THEN 0 WHEN 'impl_review' THEN 1 WHEN 'plan' THEN 2 WHEN 'plan_review' THEN 3 WHEN 'test' THEN 4 WHEN 'todo' THEN 5 WHEN 'done' THEN 6 END, id"
 ```
 
 ### Context (Session Handoff)
 `/kanban context`
 
-**Run this first when starting a new session.** Shows in-progress + review + recent done + todo:
+**Run this first when starting a new session.** Shows pipeline state across all columns:
 ```bash
-sqlite3 -header -column .claude/kanban.db "
-  SELECT id, title, priority, description, plan, implementation_notes FROM tasks
-  WHERE project='PROJECT' AND status='inprogress';
-"
-sqlite3 -header -column .claude/kanban.db "
-  SELECT id, title, priority, review_comments FROM tasks
-  WHERE project='PROJECT' AND status='review';
-"
-sqlite3 -header -column .claude/kanban.db "
-  SELECT id, title, completed_at FROM tasks
-  WHERE project='PROJECT' AND status='done'
-  ORDER BY completed_at DESC LIMIT 3;
-"
-sqlite3 -header -column .claude/kanban.db "
-  SELECT id, title, priority FROM tasks
-  WHERE project='PROJECT' AND status='todo'
-  ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 END;
-"
+BOARD=$(curl -s "http://localhost:5173/api/board?project=$PROJECT")
 ```
 
 Output format:
 ```
-### In Progress
+### Pipeline Status
+
+🔨 Implementing
 - [#3] Category Rules UI (high)
-  Requirements: ...
   Plan: ...
+  Implementation Notes: ...
 
-### Awaiting Review
+🔍 Plan Review
+- [#5] New Feature (medium)
+  Plan Review: approved by gemini
+
+📝 Impl Review
 - [#7] API Error Handling (medium)
-  Latest review: changes_requested - "Need Korean locale support for error messages"
+  Latest review: changes_requested - "Need error handling"
 
-### Recently Done
+🧪 Testing
+- [#8] Auth Module (high)
+  Test: pass - lint OK, build OK, 42/42 tests
+
+✅ Recently Done
 - [#10] Expense Flag (2026-02-20)
 
-### Next To Do
+📋 Next To Do
 - [#1] Monthly Budget (medium)
 ```
 
@@ -161,12 +264,11 @@ Output format:
 `/kanban add <title>`
 
 1. Ask the user for priority, description, and tags (use AskUserQuestion)
-2. Run INSERT:
+2. Create via API:
 ```bash
-sqlite3 .claude/kanban.db "
-  INSERT INTO tasks (project, title, priority, description, tags)
-  VALUES ('PROJECT', 'title', 'priority', 'description', '[\"tag\"]');
-"
+curl -s -X POST http://localhost:5173/api/task \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\": \"$TITLE\", \"project\": \"$PROJECT\", \"priority\": \"$PRIORITY\", \"description\": \"$DESC\"}"
 ```
 3. Output confirmation with the new task ID
 
@@ -174,150 +276,380 @@ sqlite3 .claude/kanban.db "
 `/kanban move <ID> <status>`
 
 ```bash
-# todo -> inprogress
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET status='inprogress', started_at=datetime('now')
-  WHERE id=<ID>;
-"
-
-# inprogress -> review (implementation done, request review)
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET status='review', reviewed_at=NULL
-  WHERE id=<ID>;
-"
-
-# review -> done (approved)
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET status='done', completed_at=datetime('now'), reviewed_at=datetime('now')
-  WHERE id=<ID>;
-"
-
-# review -> inprogress (changes requested)
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET status='inprogress'
-  WHERE id=<ID>;
-"
-
-# done -> todo (revert)
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET status='todo', started_at=NULL, completed_at=NULL, reviewed_at=NULL
-  WHERE id=<ID>;
-"
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d "{\"status\": \"$STATUS\"}"
 ```
 
-### Code Review
-`/kanban review <ID>`
+The API enforces valid transitions. Invalid moves return 400 with allowed transitions.
 
-When a task is in `review` status, spawn a **Task sub-agent** to perform automated code review.
+### Run Pipeline
+`/kanban run <ID>` — Execute the full AI team pipeline for a task
 
-#### Review Procedure
+**Default mode**: Pauses for user confirmation at Plan Review approval and Impl Review approval.
+**Auto mode**: `/kanban run <ID> --auto` — Fully automatic (no pauses except circuit breaker).
 
-1. Read the task's `description`, `plan`, and `implementation_notes` for context
-2. Spawn a **Task sub-agent** (subagent_type: `general-purpose`) to perform the review
-3. The review agent reads relevant code files and evaluates changes
-4. Results are stored in `review_comments` as JSON
-5. Status auto-transitions based on result:
-   - `approved` -> moves to `done`
-   - `changes_requested` -> moves back to `inprogress`
-
-#### Sub-Agent Review Prompt Template
+#### Pipeline Loop
 
 ```
-You are a code reviewer. Review Kanban task #<ID>.
+Loop:
+  1. todo → Plan Agent (opus) → plan_review
+  2. plan_review → Review Agent (gemini/codex/sonnet) → user confirm → approve:impl / reject:plan
+  3. impl → Worker(opus) then TDD Tester(sonnet) sequential → impl_review
+  4. impl_review → Code Review(gemini/codex/sonnet) → user confirm → approve:test / reject:impl
+  5. test → Test Runner(sonnet) → pass:done / fail:impl
+  6. done → Complete!
+
+Circuit breaker: plan_review_count > 3 OR impl_review_count > 3 → stop and ask user
+```
+
+#### Implementation
+
+1. **Read current task state**:
+```bash
+TASK=$(curl -s http://localhost:5173/api/task/$ID)
+STATUS=$(echo "$TASK" | jq -r '.status')
+```
+
+2. **Execute appropriate agent based on current status** (see Agent Dispatch below)
+
+3. **Loop until done or blocked**:
+   - After each agent completes, re-read task state
+   - If status progressed, continue to next agent
+   - If review rejected, loop back automatically
+   - If circuit breaker triggers, stop and notify user
+
+#### Agent Dispatch
+
+Based on task status, dispatch the appropriate agent:
+
+**`todo` → Plan Agent**:
+```
+Use Task tool: model="opus", subagent_type="general-purpose"
+```
+
+Plan Agent prompt:
+```
+You are a Plan Agent for Kanban task #<ID>.
+
+## Task Info
+- Title: <title>
+- Requirements: <description>
+
+## Your Job
+1. Read the requirements carefully
+2. Analyze the codebase to understand the current state
+3. Create a detailed implementation plan in markdown
+4. Write the plan to the task card via API
+
+## Output
+Write a markdown plan with:
+- Files to modify/create
+- Step-by-step approach
+- Key design decisions
+- Edge cases to handle
+
+## Record Results
+curl -s -X PATCH http://localhost:5173/api/task/<ID> \
+  -H 'Content-Type: application/json' \
+  -d '{"plan": "<PLAN_MARKDOWN>", "status": "plan_review", "current_agent": "plan-agent"}'
+
+Also append to agent_log:
+curl -s -X PATCH http://localhost:5173/api/task/<ID> \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_log": "<UPDATED_LOG_JSON>"}'
+```
+
+**`plan_review` → Review Agent (external CLI or sonnet)**:
+
+Detect available review CLI:
+```bash
+if command -v gemini &>/dev/null; then
+  REVIEWER="gemini"
+elif command -v codex &>/dev/null; then
+  REVIEWER="codex"
+else
+  REVIEWER="sonnet"
+fi
+```
+
+For external CLI (gemini/codex), use heredoc with quoted delimiter for shell injection prevention:
+```bash
+TASK_JSON=$(curl -s http://localhost:5173/api/task/$ID)
+REVIEW_RESULT=$(echo "$TASK_JSON" | jq -r '{title, description, plan}' | gemini --sandbox <<'REVIEW_EOF'
+Review this implementation plan. Evaluate:
+1. Is the plan complete and addresses all requirements?
+2. Are there missing edge cases?
+3. Is the approach sound?
+
+Respond with a JSON object:
+{"status": "approved" or "changes_requested", "comment": "your review in markdown"}
+REVIEW_EOF
+)
+```
+
+For sonnet fallback:
+```
+Use Task tool: model="sonnet", subagent_type="general-purpose"
+```
+
+Record result:
+```bash
+curl -s -X POST http://localhost:5173/api/task/$ID/plan-review \
+  -H 'Content-Type: application/json' \
+  -d "{\"reviewer\": \"$REVIEWER\", \"status\": \"$REVIEW_STATUS\", \"comment\": \"$REVIEW_COMMENT\"}"
+```
+
+Default mode: After review, ask user with AskUserQuestion whether to accept/reject.
+Auto mode (`--auto`): Auto-accept the review agent's decision.
+
+**`impl` → Worker Agent (opus) then TDD Tester (sonnet) — sequential**:
+
+Step 1 - Worker Agent:
+```
+Use Task tool: model="opus", subagent_type="general-purpose"
+```
+
+Worker Agent prompt:
+```
+You are a Worker Agent implementing Kanban task #<ID>.
 
 ## Task Info
 - Title: <title>
 - Requirements: <description>
 - Plan: <plan>
-- Implementation Notes: <implementation_notes>
+- Plan Review Comments: <plan_review_comments>
 
-## Review Checklist
-1. **Code Quality**: Readability, duplication, function size, naming
-2. **Error Handling**: Proper try-catch, error message quality
-3. **Type Safety**: TypeScript types, minimize `any` usage
-4. **Security**: SQL injection, XSS, input validation
-5. **Performance**: Unnecessary queries, memory usage, N+1 problems
+## Your Job
+1. Follow the plan to implement the changes
+2. Write clean, well-tested code
+3. Document what you changed
 
-## How to Review
-1. Read the relevant code files to understand changes
-2. Evaluate against the checklist above
-3. Record results using the sqlite3 command below
+## Record Results
+After implementation, update the task:
+curl -s -X PATCH http://localhost:5173/api/task/<ID> \
+  -H 'Content-Type: application/json' \
+  -d '{"implementation_notes": "<NOTES_MARKDOWN>", "current_agent": "worker-agent"}'
 
-## Recording Results
-
-If no issues (approve):
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET
-    review_comments = json_insert(
-      COALESCE(review_comments, '[]'),
-      '$[#]',
-      json_object(
-        'reviewer', 'claude-review-agent',
-        'status', 'approved',
-        'comment', 'Approved. [specific reason]',
-        'timestamp', datetime('now')
-      )
-    ),
-    reviewed_at = datetime('now'),
-    status = 'done',
-    completed_at = datetime('now')
-  WHERE id=<ID>;
-"
-
-If issues found (request changes):
-sqlite3 .claude/kanban.db "
-  UPDATE tasks SET
-    review_comments = json_insert(
-      COALESCE(review_comments, '[]'),
-      '$[#]',
-      json_object(
-        'reviewer', 'claude-review-agent',
-        'status', 'changes_requested',
-        'comment', '## Changes Required\n\n[specific feedback]',
-        'timestamp', datetime('now')
-      )
-    ),
-    reviewed_at = datetime('now'),
-    status = 'inprogress'
-  WHERE id=<ID>;
-"
+Also append to agent_log.
+Do NOT change the status - the orchestrator handles that.
 ```
 
-#### Post-Review Re-implementation Flow
+Step 2 - TDD Tester (runs after Worker completes):
+```
+Use Task tool: model="sonnet", subagent_type="general-purpose"
+```
 
-When `changes_requested`:
-1. Card auto-moves to `inprogress`
-2. Implementation agent runs `/kanban context` to read review comments
-3. Fixes the issues, then `/kanban move <ID> review`
-4. `/kanban review <ID>` triggers another review
-5. Repeats until approved
+TDD Tester prompt:
+```
+You are a TDD Tester for Kanban task #<ID>.
+
+## Task Info
+- Title: <title>
+- Requirements: <description>
+- Implementation Notes: <implementation_notes>
+
+## Your Job
+1. Read the implementation notes to understand what was changed
+2. Write or update tests for the new/modified code
+3. Ensure test coverage for edge cases
+4. Append your test notes to implementation_notes
+
+## Record Results
+curl -s -X PATCH http://localhost:5173/api/task/<ID> \
+  -H 'Content-Type: application/json' \
+  -d '{"implementation_notes": "<UPDATED_NOTES>", "current_agent": "tdd-tester"}'
+
+Do NOT change the status.
+```
+
+After both complete, move to impl_review:
+```bash
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d '{"status": "impl_review", "current_agent": null}'
+```
+
+**`impl_review` → Code Review Agent**:
+
+Same reviewer detection as plan_review. Uses gemini/codex/sonnet.
+
+For external CLI:
+```bash
+TASK_JSON=$(curl -s http://localhost:5173/api/task/$ID)
+REVIEW_RESULT=$(echo "$TASK_JSON" | jq -r '{title, description, plan, implementation_notes}' | gemini --sandbox <<'REVIEW_EOF'
+Review this code implementation. Evaluate:
+1. Code quality: readability, duplication, naming
+2. Error handling: proper try-catch, error messages
+3. Type safety: TypeScript types, minimize any usage
+4. Security: SQL injection, XSS, input validation
+5. Performance: unnecessary queries, memory usage
+
+Respond with a JSON object:
+{"status": "approved" or "changes_requested", "comment": "your review in markdown"}
+REVIEW_EOF
+)
+```
+
+Record result:
+```bash
+curl -s -X POST http://localhost:5173/api/task/$ID/review \
+  -H 'Content-Type: application/json' \
+  -d "{\"reviewer\": \"$REVIEWER\", \"status\": \"$REVIEW_STATUS\", \"comment\": \"$REVIEW_COMMENT\"}"
+```
+
+Default mode: Ask user with AskUserQuestion whether to accept/reject.
+Auto mode: Auto-accept the review agent's decision.
+
+**`test` → Test Runner Agent**:
+```
+Use Task tool: model="sonnet", subagent_type="general-purpose"
+```
+
+Test Runner prompt:
+```
+You are a Test Runner Agent for Kanban task #<ID>.
+
+## Task Info
+- Title: <title>
+- Implementation Notes: <implementation_notes>
+
+## Your Job
+1. Run lint checks
+2. Run build
+3. Run tests
+4. Report results
+
+## Record Results
+curl -s -X POST http://localhost:5173/api/task/<ID>/test-result \
+  -H 'Content-Type: application/json' \
+  -d '{"tester": "test-runner", "status": "pass" or "fail", "lint": "...", "build": "...", "tests": "...", "comment": "..."}'
+```
+
+### Step (Single Step)
+`/kanban step <ID>` — Execute only the next pipeline step for a task
+
+Same as `/kanban run` but exits after one step instead of looping.
+
+### Agents
+`/kanban agents` — Show available agents
+
+Detect and display:
+```bash
+echo "## Available Agents"
+echo ""
+echo "| Agent | Model | Available |"
+echo "|-------|-------|-----------|"
+
+if command -v gemini &>/dev/null; then
+  echo "| Review Agent | gemini | ✅ |"
+else
+  echo "| Review Agent | gemini | ❌ |"
+fi
+
+if command -v codex &>/dev/null; then
+  echo "| Review Agent | codex | ✅ (fallback) |"
+else
+  echo "| Review Agent | codex | ❌ |"
+fi
+
+echo "| Plan Agent | opus (Task) | ✅ |"
+echo "| Worker Agent | opus (Task) | ✅ |"
+echo "| TDD Tester | sonnet (Task) | ✅ |"
+echo "| Review Agent | sonnet (Task) | ✅ (fallback) |"
+echo "| Test Runner | sonnet (Task) | ✅ |"
+```
+
+### Review
+`/kanban review <ID>`
+
+When a task is in `impl_review` status, trigger a Code Review agent (same as impl_review step in the pipeline).
 
 ### Edit Task
 `/kanban edit <ID>`
 
-Ask the user which fields to modify, then run UPDATE.
+Ask the user which fields to modify, then update via API.
 
 ### Delete Task
 `/kanban remove <ID>`
 
 ```bash
-sqlite3 .claude/kanban.db "DELETE FROM tasks WHERE id=<ID>;"
+# Note: delete is not available via API, use sqlite3 as fallback
+sqlite3 .claude/kanban.db "DELETE FROM tasks WHERE id=$ID;"
 ```
 
 ### Stats
 `/kanban stats`
 
 ```bash
-sqlite3 -header -column .claude/kanban.db "
-  SELECT status, COUNT(*) as count, GROUP_CONCAT(title, ', ') as titles
-  FROM tasks WHERE project='PROJECT'
-  GROUP BY status;
-"
+BOARD=$(curl -s "http://localhost:5173/api/board?project=$PROJECT")
+echo "$BOARD" | jq '{
+  todo: (.todo | length),
+  plan: (.plan | length),
+  plan_review: (.plan_review | length),
+  impl: (.impl | length),
+  impl_review: (.impl_review | length),
+  test: (.test | length),
+  done: (.done | length),
+  total: ((.todo + .plan + .plan_review + .impl + .impl_review + .test + .done) | length)
+}'
+```
+
+## Error Handling
+
+### Agent Failure
+- 1 retry on first failure
+- 2nd failure: keep current status, log error to `agent_log`, notify user
+
+### External CLI Failure
+- `which gemini` not found → try `codex` → fallback to `sonnet` (Task tool)
+- CLI execution error → log to `agent_log`, retry once, then fallback
+
+### Review Rejection Loop (Circuit Breaker)
+- `plan_review_count > 3`: stop loop, ask user for guidance
+- `impl_review_count > 3`: stop loop, ask user for guidance
+- In `--auto` mode: circuit breaker still fires, loop stops, user intervention required
+
+### Mid-Pipeline Crash
+- Current status is preserved (no partial transitions)
+- Error logged to `agent_log`
+- User notified of the failure
+
+## Agent Context Flow (Card = Communication Channel)
+
+Each agent reads all card fields and writes to its designated field:
+
+```
+Plan Agent   → reads: description
+              → writes: plan
+              → moves: todo → plan_review
+
+Review Agent → reads: description, plan
+              → writes: plan_review_comments
+              → moves: plan_review → impl (approved) or plan (rejected)
+
+Worker Agent → reads: description, plan, plan_review_comments
+              → writes: implementation_notes
+              → (no status change)
+
+TDD Tester   → reads: description, implementation_notes
+              → writes: implementation_notes (appends)
+              → moves: impl → impl_review (after both complete)
+
+Code Review  → reads: description, plan, implementation_notes
+              → writes: review_comments
+              → moves: impl_review → test (approved) or impl (rejected)
+
+Test Runner  → reads: implementation_notes
+              → writes: test_results
+              → moves: test → done (pass) or impl (fail)
+
+All agents   → append to: agent_log
 ```
 
 ## Initial Setup
 
-Auto-creates DB if missing:
+Auto-creates DB if missing (via HTTP API or sqlite3 fallback):
 ```bash
 mkdir -p .claude
 sqlite3 .claude/kanban.db "
@@ -332,9 +664,17 @@ sqlite3 .claude/kanban.db "
     implementation_notes TEXT,
     tags TEXT,
     review_comments TEXT,
+    plan_review_comments TEXT,
+    test_results TEXT,
+    agent_log TEXT,
+    current_agent TEXT,
+    plan_review_count INTEGER NOT NULL DEFAULT 0,
+    impl_review_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT,
+    planned_at TEXT,
     reviewed_at TEXT,
+    tested_at TEXT,
     completed_at TEXT
   );
 "
@@ -354,67 +694,81 @@ echo ".claude/kanban.db-shm" >> .gitignore
 
 The implementation agent MUST record documentation at each phase. Summarize what you would normally output in chat as markdown and write it to the card.
 
-### Step 1: Start Implementation
+### Step 1: Start Pipeline
 
 ```bash
-# Move to inprogress
-sqlite3 .claude/kanban.db "UPDATE tasks SET status='inprogress', started_at=datetime('now') WHERE id=<ID>;"
-
-# Record plan (after analyzing code, write implementation plan as markdown)
-sqlite3 .claude/kanban.db "UPDATE tasks SET plan='## Implementation Plan
-
-### Files to Modify
-- src/lib/xxx.ts - Core logic changes
-- src/app/api/xxx/route.ts - API endpoint
-
-### Approach
-1. First modify XXX
-2. Then add YYY
-3. Test' WHERE id=<ID>;"
+# Move to plan
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d '{"status": "plan", "current_agent": "plan-agent"}'
 ```
 
-### Step 2: Complete Implementation
+### Step 2: Record Plan
 
 ```bash
-# Record what was done (summarize actual changes as markdown)
-sqlite3 .claude/kanban.db "UPDATE tasks SET implementation_notes='## Changes
-
-### Modified Files
-- **src/lib/xxx.ts**: Added XXX function, modified YYY logic
-- **src/app/api/xxx/route.ts**: New endpoint
-
-### Key Changes
-- Implemented ZZZ feature
-- Added error handling' WHERE id=<ID>;"
-
-# Move to review
-sqlite3 .claude/kanban.db "UPDATE tasks SET status='review', reviewed_at=NULL WHERE id=<ID>;"
+# Record plan via API
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d '{"plan": "## Implementation Plan\n\n### Files to Modify\n- src/lib/xxx.ts\n\n### Approach\n1. First modify XXX\n2. Then add YYY", "status": "plan_review"}'
 ```
 
-### Step 3: Review
-`/kanban review <ID>` to trigger automated code review
+### Step 3: Plan Review
 
-### Step 4: Review Result
-- **Approved**: Auto-moves to `done`
-- **Changes requested**: Auto-moves to `inprogress` -> fix -> move to `review` again
+```bash
+# Submit plan review
+curl -s -X POST http://localhost:5173/api/task/$ID/plan-review \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer": "gemini", "status": "approved", "comment": "Plan is thorough and complete."}'
+```
 
-### Step 5: New Session
-`/kanban context` to see full lifecycle (requirements, plan, implementation notes, review comments)
+### Step 4: Implementation
+
+```bash
+# Record implementation
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d '{"implementation_notes": "## Changes\n\n### Modified Files\n- src/lib/xxx.ts: Added feature\n\n### Tests Added\n- test/xxx.test.ts: 5 new tests"}'
+
+# Move to impl_review
+curl -s -X PATCH http://localhost:5173/api/task/$ID \
+  -H 'Content-Type: application/json' \
+  -d '{"status": "impl_review"}'
+```
+
+### Step 5: Code Review
+
+```bash
+# Submit code review
+curl -s -X POST http://localhost:5173/api/task/$ID/review \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer": "gemini", "status": "approved", "comment": "Code quality is good."}'
+```
+
+### Step 6: Test
+
+```bash
+# Submit test results
+curl -s -X POST http://localhost:5173/api/task/$ID/test-result \
+  -H 'Content-Type: application/json' \
+  -d '{"tester": "test-runner", "status": "pass", "lint": "0 errors", "build": "OK", "tests": "42 passed", "comment": "All checks pass."}'
+```
 
 ### Summary
 
 | Phase | Field | Content | Written By |
 |-------|-------|---------|------------|
-| Requirements | `description` | What needs to be done | User / Planning |
-| Plan | `plan` | How to approach it | Implementation agent |
-| Implementation | `implementation_notes` | What was actually changed | Implementation agent |
-| Review | `review_comments` | Verification results, feedback | Review agent |
+| Requirements | `description` | What needs to be done | User |
+| Plan | `plan` | How to approach it | Plan Agent (opus) |
+| Plan Review | `plan_review_comments` | Plan verification | Review Agent (gemini/codex/sonnet) |
+| Implementation | `implementation_notes` | What was changed + tests | Worker (opus) + TDD Tester (sonnet) |
+| Impl Review | `review_comments` | Code review results | Code Review Agent (gemini/codex/sonnet) |
+| Test | `test_results` | Lint/build/test results | Test Runner (sonnet) |
 
-## Web Board Viewer (Optional)
+## Web Board Viewer
 
 Run `/kanban-init` to scaffold the web board in any project. It creates a `kanban-board/` directory with all files.
 
 ```bash
 cd kanban-board && pnpm dev
 ```
-Default port: 5173 (auto-increments if in use). Open the 4-column board (To Do, In Progress, Review, Done) with drag-and-drop, card lifecycle modal, add card form, and 10s auto-refresh.
+Default port: 5173 (auto-increments if in use). Open the 7-column board (Req, Plan, Review Plan, Implement, Review Impl, Test, Done) with drag-and-drop (valid transitions only), card lifecycle modal with 7-step progress bar, add card form, agent log viewer, and 10s auto-refresh.
