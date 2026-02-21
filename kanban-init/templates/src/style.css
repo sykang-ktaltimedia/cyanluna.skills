@@ -208,6 +208,10 @@ main#board {
   cursor: pointer;
   transition: border-color 0.15s, transform 0.1s, opacity 0.15s;
 }
+.card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;
+}
 .card:hover {
   border-color: #475569;
   transform: translateY(-1px);

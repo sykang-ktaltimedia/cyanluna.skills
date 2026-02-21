@@ -66,9 +66,10 @@ function priorityClass(priority: string): string {
 }
 
 function parseTags(tags: string | null): string[] {
-  if (!tags) return [];
+  if (!tags || tags === "null") return [];
   try {
-    return JSON.parse(tags);
+    const parsed = JSON.parse(tags);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -87,9 +88,10 @@ function timeAgo(dateStr: string): string {
 }
 
 function parseJsonArray(raw: string | null): any[] {
-  if (!raw) return [];
+  if (!raw || raw === "null") return [];
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -204,19 +206,32 @@ function renderColumn(
   `;
 }
 
+// Hoisted RegExp constants for simpleMarkdownToHtml (avoid re-creation per call)
+const RE_CODE_BLOCK = /```[\s\S]*?```/g;
+const RE_CODE_OPEN = /```\w*\n?/;
+const RE_CODE_CLOSE = /```$/;
+const RE_BOLD = /\*\*(.+?)\*\*/g;
+const RE_INLINE_CODE = /`([^`]+)`/g;
+const RE_CB_PLACEHOLDER = /^\x00CB(\d+)\x00$/;
+const RE_H3 = /^### (.+)$/;
+const RE_H2 = /^## (.+)$/;
+const RE_H1 = /^# (.+)$/;
+const RE_UL = /^[-*]\s+(.+)$/;
+const RE_OL = /^\d+\.\s+(.+)$/;
+
 function simpleMarkdownToHtml(md: string): string {
   // Extract code blocks first to protect them
   const codeBlocks: string[] = [];
-  let text = md.replace(/```[\s\S]*?```/g, (match) => {
-    const code = match.replace(/```\w*\n?/, "").replace(/```$/, "");
+  let text = md.replace(RE_CODE_BLOCK, (match) => {
+    const code = match.replace(RE_CODE_OPEN, "").replace(RE_CODE_CLOSE, "");
     codeBlocks.push(`<pre><code>${code}</code></pre>`);
     return `\x00CB${codeBlocks.length - 1}\x00`;
   });
 
   // Inline formatting
   text = text
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>");
+    .replace(RE_BOLD, "<strong>$1</strong>")
+    .replace(RE_INLINE_CODE, "<code>$1</code>");
 
   // Process line by line to build proper block structure
   const lines = text.split("\n");
@@ -228,7 +243,7 @@ function simpleMarkdownToHtml(md: string): string {
     const trimmed = line.trim();
 
     // Code block placeholder
-    const cbMatch = trimmed.match(/^\x00CB(\d+)\x00$/);
+    const cbMatch = trimmed.match(RE_CB_PLACEHOLDER);
     if (cbMatch) {
       if (inUl) { out.push("</ul>"); inUl = false; }
       if (inOl) { out.push("</ol>"); inOl = false; }
@@ -237,21 +252,21 @@ function simpleMarkdownToHtml(md: string): string {
     }
 
     // Headings
-    const h3 = trimmed.match(/^### (.+)$/);
+    const h3 = trimmed.match(RE_H3);
     if (h3) {
       if (inUl) { out.push("</ul>"); inUl = false; }
       if (inOl) { out.push("</ol>"); inOl = false; }
       out.push(`<h3>${h3[1]}</h3>`);
       continue;
     }
-    const h2 = trimmed.match(/^## (.+)$/);
+    const h2 = trimmed.match(RE_H2);
     if (h2) {
       if (inUl) { out.push("</ul>"); inUl = false; }
       if (inOl) { out.push("</ol>"); inOl = false; }
       out.push(`<h2>${h2[1]}</h2>`);
       continue;
     }
-    const h1 = trimmed.match(/^# (.+)$/);
+    const h1 = trimmed.match(RE_H1);
     if (h1) {
       if (inUl) { out.push("</ul>"); inUl = false; }
       if (inOl) { out.push("</ol>"); inOl = false; }
@@ -260,7 +275,7 @@ function simpleMarkdownToHtml(md: string): string {
     }
 
     // Unordered list
-    const ul = trimmed.match(/^[-*]\s+(.+)$/);
+    const ul = trimmed.match(RE_UL);
     if (ul) {
       if (inOl) { out.push("</ol>"); inOl = false; }
       if (!inUl) { out.push("<ul>"); inUl = true; }
@@ -269,7 +284,7 @@ function simpleMarkdownToHtml(md: string): string {
     }
 
     // Ordered list
-    const ol = trimmed.match(/^\d+\.\s+(.+)$/);
+    const ol = trimmed.match(RE_OL);
     if (ol) {
       if (inUl) { out.push("</ul>"); inUl = false; }
       if (!inOl) { out.push("<ol>"); inOl = true; }
@@ -349,7 +364,7 @@ function renderTestEntries(results: any[]): string {
   `).join('');
 }
 
-async function uploadFiles(taskId: number, files: FileList) {
+async function uploadFiles(taskId: number, files: FileList | File[]) {
   for (const file of Array.from(files)) {
     if (!file.type.startsWith("image/")) continue;
     const reader = new FileReader();
@@ -710,7 +725,8 @@ async function loadBoard() {
         (document.getElementById("add-title") as HTMLInputElement).focus();
       });
     }
-  } catch {
+  } catch (err) {
+    console.error("loadBoard failed:", err);
     board.innerHTML = `
       <div style="grid-column:1/-1;display:flex;align-items:center;justify-content:center;color:#ef4444;font-size:0.9rem;padding:48px">
         Cannot find .claude/kanban.db
@@ -907,13 +923,71 @@ document.addEventListener("keydown", (e) => {
 
 // Add card modal
 const addCardOverlay = document.getElementById("add-card-overlay")!;
+let pendingFiles: File[] = [];
+
+function renderAddAttachmentPreview() {
+  const preview = document.getElementById("add-attachment-preview")!;
+  if (pendingFiles.length === 0) {
+    preview.innerHTML = "";
+    return;
+  }
+  preview.innerHTML = pendingFiles.map((f, i) => `
+    <div class="attachment-thumb">
+      <img src="${URL.createObjectURL(f)}" alt="${f.name}" />
+      <button class="attachment-remove" data-idx="${i}" title="Remove" type="button">&times;</button>
+      <span class="attachment-name">${f.name}</span>
+    </div>
+  `).join("");
+  preview.querySelectorAll(".attachment-remove").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt((btn as HTMLElement).dataset.idx!);
+      pendingFiles.splice(idx, 1);
+      renderAddAttachmentPreview();
+    });
+  });
+}
+
+function addPendingFiles(files: FileList | File[]) {
+  for (const f of Array.from(files)) {
+    if (f.type.startsWith("image/")) pendingFiles.push(f);
+  }
+  renderAddAttachmentPreview();
+}
+
 document.getElementById("add-card-close")!.addEventListener("click", () => {
   addCardOverlay.classList.add("hidden");
+  pendingFiles = [];
+  renderAddAttachmentPreview();
 });
 addCardOverlay.addEventListener("click", (e) => {
   if (e.target === e.currentTarget) {
     addCardOverlay.classList.add("hidden");
+    pendingFiles = [];
+    renderAddAttachmentPreview();
   }
+});
+
+// Add card attachment drop zone
+const addAttachZone = document.getElementById("add-attachment-zone")!;
+const addAttachInput = document.getElementById("add-attachment-input") as HTMLInputElement;
+addAttachZone.addEventListener("click", () => addAttachInput.click());
+addAttachZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  addAttachZone.classList.add("drop-active");
+});
+addAttachZone.addEventListener("dragleave", () => {
+  addAttachZone.classList.remove("drop-active");
+});
+addAttachZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  addAttachZone.classList.remove("drop-active");
+  const files = (e as DragEvent).dataTransfer?.files;
+  if (files) addPendingFiles(files);
+});
+addAttachInput.addEventListener("change", () => {
+  if (addAttachInput.files) addPendingFiles(addAttachInput.files);
+  addAttachInput.value = "";
 });
 
 document.getElementById("add-card-form")!.addEventListener("submit", async (e) => {
@@ -929,13 +1003,27 @@ document.getElementById("add-card-form")!.addEventListener("submit", async (e) =
 
   const project = currentProject || undefined;
 
-  await fetch("/api/task", {
+  const submitBtn = document.querySelector("#add-card-form .form-submit") as HTMLButtonElement;
+  submitBtn.textContent = pendingFiles.length > 0 ? "Creating..." : "Add Card";
+  submitBtn.disabled = true;
+
+  const res = await fetch("/api/task", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title, priority, level, description, tags, project }),
   });
+  const result = await res.json();
 
+  // Upload pending attachments
+  if (pendingFiles.length > 0 && result.id) {
+    await uploadFiles(result.id, pendingFiles as any);
+  }
+
+  pendingFiles = [];
+  submitBtn.textContent = "Add Card";
+  submitBtn.disabled = false;
   (document.getElementById("add-card-form") as HTMLFormElement).reset();
+  renderAddAttachmentPreview();
   addCardOverlay.classList.add("hidden");
   loadBoard();
 });

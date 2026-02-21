@@ -43,7 +43,11 @@ function getTransitions(level: number): Record<string, string[]> {
   };
 }
 
+let _db: Database.Database | null = null;
+
 function getDb(): Database.Database {
+  if (_db) return _db;
+
   const db = new Database(DB_PATH);
   db.pragma("journal_mode = WAL");
 
@@ -142,6 +146,7 @@ function getDb(): Database.Database {
   db.exec(`UPDATE tasks SET status = 'impl' WHERE status = 'inprogress'`);
   db.exec(`UPDATE tasks SET status = 'impl_review' WHERE status = 'review'`);
 
+  _db = db;
   return db;
 }
 
@@ -194,6 +199,16 @@ interface Board {
   projects: string[];
 }
 
+// Alias mapping for backward compatibility (old 4-column → new 7-column)
+const STATUS_ALIASES: Record<string, string> = {
+  inprogress: "impl",
+  review: "impl_review",
+};
+
+function normalizeStatus(status: string): string {
+  return STATUS_ALIASES[status] || status;
+}
+
 export function kanbanApiPlugin(): Plugin {
   return {
     name: "kanban-api",
@@ -227,7 +242,7 @@ export function kanbanApiPlugin(): Plugin {
           const project = url.searchParams.get("project");
 
           const db = getDb();
-          try {
+          {
             let tasks: Task[];
             if (project) {
               tasks = db
@@ -245,21 +260,25 @@ export function kanbanApiPlugin(): Plugin {
                 .all() as { project: string }[]
             ).map((r) => r.project);
 
+            const grouped = new Map<string, Task[]>();
+            for (const t of tasks) {
+              const arr = grouped.get(t.status);
+              if (arr) arr.push(t);
+              else grouped.set(t.status, [t]);
+            }
             const board: Board = {
-              todo: tasks.filter((t) => t.status === "todo"),
-              plan: tasks.filter((t) => t.status === "plan"),
-              plan_review: tasks.filter((t) => t.status === "plan_review"),
-              impl: tasks.filter((t) => t.status === "impl"),
-              impl_review: tasks.filter((t) => t.status === "impl_review"),
-              test: tasks.filter((t) => t.status === "test"),
-              done: tasks.filter((t) => t.status === "done"),
+              todo: grouped.get("todo") || [],
+              plan: grouped.get("plan") || [],
+              plan_review: grouped.get("plan_review") || [],
+              impl: grouped.get("impl") || [],
+              impl_review: grouped.get("impl_review") || [],
+              test: grouped.get("test") || [],
+              done: grouped.get("done") || [],
               projects,
             };
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify(board));
-          } finally {
-            db.close();
           }
           return;
         }
@@ -268,7 +287,7 @@ export function kanbanApiPlugin(): Plugin {
         if (req.url?.match(/^\/api\/task\/\d+$/) && req.method === "GET") {
           const id = req.url.split("/").pop();
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT * FROM tasks WHERE id = ?")
               .get(id) as Task | undefined;
@@ -281,8 +300,6 @@ export function kanbanApiPlugin(): Plugin {
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify(task));
-          } finally {
-            db.close();
           }
           return;
         }
@@ -291,8 +308,9 @@ export function kanbanApiPlugin(): Plugin {
         if (req.url?.match(/^\/api\/task\/\d+$/) && req.method === "PATCH") {
           const id = req.url.split("/").pop();
           const body = await parseBody(req);
+          if (body.status !== undefined) body.status = normalizeStatus(body.status);
           const db = getDb();
-          try {
+          {
             // Status transition validation
             if (body.status !== undefined) {
               const task = db
@@ -420,8 +438,6 @@ export function kanbanApiPlugin(): Plugin {
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ success: true }));
-          } finally {
-            db.close();
           }
           return;
         }
@@ -433,8 +449,9 @@ export function kanbanApiPlugin(): Plugin {
         ) {
           const id = parseInt(req.url.split("/")[3]);
           const body = await parseBody(req);
+          if (body.status !== undefined) body.status = normalizeStatus(body.status);
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT * FROM tasks WHERE id = ?")
               .get(id) as Task | undefined;
@@ -526,8 +543,6 @@ export function kanbanApiPlugin(): Plugin {
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ success: true, rank: newRank }));
-          } finally {
-            db.close();
           }
           return;
         }
@@ -536,7 +551,7 @@ export function kanbanApiPlugin(): Plugin {
         if (req.url === "/api/task" && req.method === "POST") {
           const body = await parseBody(req);
           const db = getDb();
-          try {
+          {
             const project =
               body.project ||
               path.basename(path.resolve(__dirname, "..", ".."));
@@ -568,8 +583,6 @@ export function kanbanApiPlugin(): Plugin {
             res.end(
               JSON.stringify({ success: true, id: result.lastInsertRowid })
             );
-          } finally {
-            db.close();
           }
           return;
         }
@@ -582,7 +595,7 @@ export function kanbanApiPlugin(): Plugin {
           const id = req.url.split("/")[3];
           const body = await parseBody(req);
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT review_comments, status, impl_review_count, level FROM tasks WHERE id = ?")
               .get(id) as { review_comments: string | null; status: string; impl_review_count: number; level: number } | undefined;
@@ -635,8 +648,6 @@ export function kanbanApiPlugin(): Plugin {
             res.end(
               JSON.stringify({ success: true, newStatus, comment: newComment })
             );
-          } finally {
-            db.close();
           }
           return;
         }
@@ -649,7 +660,7 @@ export function kanbanApiPlugin(): Plugin {
           const id = req.url.split("/")[3];
           const body = await parseBody(req);
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT plan_review_comments, status, plan_review_count FROM tasks WHERE id = ?")
               .get(id) as { plan_review_comments: string | null; status: string; plan_review_count: number } | undefined;
@@ -694,8 +705,6 @@ export function kanbanApiPlugin(): Plugin {
             res.end(
               JSON.stringify({ success: true, newStatus, comment: newComment })
             );
-          } finally {
-            db.close();
           }
           return;
         }
@@ -708,7 +717,7 @@ export function kanbanApiPlugin(): Plugin {
           const id = req.url.split("/")[3];
           const body = await parseBody(req);
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT test_results, status FROM tasks WHERE id = ?")
               .get(id) as { test_results: string | null; status: string } | undefined;
@@ -755,8 +764,6 @@ export function kanbanApiPlugin(): Plugin {
             res.end(
               JSON.stringify({ success: true, newStatus, result: newResult })
             );
-          } finally {
-            db.close();
           }
           return;
         }
@@ -765,7 +772,7 @@ export function kanbanApiPlugin(): Plugin {
         if (req.url?.match(/^\/api\/task\/\d+$/) && req.method === "DELETE") {
           const id = req.url.split("/").pop();
           const db = getDb();
-          try {
+          {
             // Delete associated attachment files
             const task = db
               .prepare("SELECT attachments FROM tasks WHERE id = ?")
@@ -783,8 +790,6 @@ export function kanbanApiPlugin(): Plugin {
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ success: true }));
-          } finally {
-            db.close();
           }
           return;
         }
@@ -809,7 +814,7 @@ export function kanbanApiPlugin(): Plugin {
           }
 
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT attachments FROM tasks WHERE id = ?")
               .get(id) as { attachments: string | null } | undefined;
@@ -851,8 +856,6 @@ export function kanbanApiPlugin(): Plugin {
               success: true,
               attachment: attachments[attachments.length - 1],
             }));
-          } finally {
-            db.close();
           }
           return;
         }
@@ -866,7 +869,7 @@ export function kanbanApiPlugin(): Plugin {
           const id = parts[3];
           const storedName = decodeURIComponent(parts[5]);
           const db = getDb();
-          try {
+          {
             const task = db
               .prepare("SELECT attachments FROM tasks WHERE id = ?")
               .get(id) as { attachments: string | null } | undefined;
@@ -891,8 +894,6 @@ export function kanbanApiPlugin(): Plugin {
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ success: true }));
-          } finally {
-            db.close();
           }
           return;
         }

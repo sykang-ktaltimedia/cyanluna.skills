@@ -61,6 +61,14 @@
             <label for="add-tags">Tags <span style="color:#64748b;font-weight:400">(comma separated)</span></label>
             <input type="text" id="add-tags" placeholder="e.g. feature, api, ui" />
           </div>
+          <div class="form-group">
+            <label>Attachments</label>
+            <div class="attachment-drop-zone" id="add-attachment-zone">
+              <span>&#x1F4CE; Drop images here or click to attach</span>
+              <input type="file" id="add-attachment-input" accept="image/*" multiple hidden />
+            </div>
+            <div class="attachments-grid" id="add-attachment-preview"></div>
+          </div>
           <button type="submit" class="form-submit">Add Card</button>
         </form>
       </div>
