@@ -1,19 +1,29 @@
 ---
 name: kanban
-description: Manage project tasks in a local SQLite DB (.claude/kanban.db). Supports 7-column AI team pipeline (Req → Plan → Review Plan → Impl → Review Impl → Test → Done), session context persistence, task CRUD, lifecycle documentation, and automated code review. Run with /kanban.
+description: Manage project tasks in the central kanban DB (~/.claude/kanban.db). Supports 7-column AI team pipeline (Req → Plan → Review Plan → Impl → Review Impl → Test → Done), session context persistence, task CRUD, lifecycle documentation, and automated code review. Run /kanban-init first to register the project.
 license: MIT
 ---
 
-Manages project tasks in a project-local `.claude/kanban.db` SQLite database.
-The DB lives inside the project directory, so it travels with the project and can be version-controlled.
+Manages project tasks in the **central** `~/.claude/kanban.db` SQLite database shared across all projects.
+Each task has a `project` column that isolates data per project.
 
-## DB Path
+## DB Path & Project Config
 
+Read project config from `.claude/kanban.json` (created by `/kanban-init`):
+
+```bash
+# Read project name and DB path
+CONFIG=$(cat .claude/kanban.json 2>/dev/null)
+PROJECT=$(echo "$CONFIG" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['project'])" 2>/dev/null || basename "$(pwd)")
+DB=$(echo "$CONFIG" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['db'].replace('~', '$HOME'))" 2>/dev/null || echo "$HOME/.claude/kanban.db")
 ```
-{project_root}/.claude/kanban.db
+
+Central DB path (default when no config):
+```
+~/.claude/kanban.db
 ```
 
-Auto-creates the `.claude/` directory and DB file if missing.
+If `.claude/kanban.json` doesn't exist, prompt the user to run `/kanban-init` first, or fall back to `basename "$(pwd)"` as project name and `~/.claude/kanban.db` as DB.
 
 ## Table Schema
 
@@ -181,16 +191,16 @@ Standard agent + model combinations:
 ### Priority: HTTP API → sqlite3 CLI
 
 1. **HTTP API** (preferred when kanban-board dev server is running): `http://localhost:5173`
-2. **sqlite3 CLI** (when dev server is not running, or for direct queries/bulk ops): `sqlite3 .claude/kanban.db`
+2. **sqlite3 CLI** (when dev server is not running, or for direct queries/bulk ops): `sqlite3 ~/.claude/kanban.db`
 
 **IMPORTANT**: Do NOT use Python (`python3 -c "import sqlite3..."`) for DB access. Always use the `sqlite3` CLI command which is installed at `/usr/bin/sqlite3`.
 
 ```bash
 # Quick read example
-sqlite3 -json .claude/kanban.db "SELECT id, title, status, priority FROM tasks WHERE project='$(basename $(pwd))' ORDER BY id"
+sqlite3 -json ~/.claude/kanban.db "SELECT id, title, status, priority FROM tasks WHERE project='$PROJECT' ORDER BY id"
 
 # Quick update example
-sqlite3 .claude/kanban.db "UPDATE tasks SET status='impl', started_at=datetime('now') WHERE id=$ID"
+sqlite3 ~/.claude/kanban.db "UPDATE tasks SET status='impl', started_at=datetime('now') WHERE id=$ID"
 ```
 
 Base URL: `http://localhost:5173` (default kanban-board port)
@@ -266,8 +276,8 @@ Output format:
 
 If the kanban-board dev server is not running, fall back to sqlite3:
 ```bash
-sqlite3 -header -column .claude/kanban.db \
-  "SELECT id, title, status, priority FROM tasks WHERE project='PROJECT' ORDER BY CASE status WHEN 'impl' THEN 0 WHEN 'impl_review' THEN 1 WHEN 'plan' THEN 2 WHEN 'plan_review' THEN 3 WHEN 'test' THEN 4 WHEN 'todo' THEN 5 WHEN 'done' THEN 6 END, id"
+sqlite3 -header -column ~/.claude/kanban.db \
+  "SELECT id, title, status, priority FROM tasks WHERE project='$PROJECT' ORDER BY CASE status WHEN 'impl' THEN 0 WHEN 'impl_review' THEN 1 WHEN 'plan' THEN 2 WHEN 'plan_review' THEN 3 WHEN 'test' THEN 4 WHEN 'todo' THEN 5 WHEN 'done' THEN 6 END, id"
 ```
 
 ### Context (Session Handoff)
@@ -786,49 +796,19 @@ All agents   → append to: agent_log
 
 ## Initial Setup
 
-Auto-creates DB if missing. Use `sqlite3` CLI (NOT python):
+Run `/kanban-init` first to register this project. It creates `.claude/kanban.json` and ensures the central DB schema exists.
+
+If needed manually:
 ```bash
-mkdir -p .claude
-sqlite3 .claude/kanban.db "
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'todo',
-    priority TEXT NOT NULL DEFAULT 'medium',
-    description TEXT,
-    plan TEXT,
-    implementation_notes TEXT,
-    tags TEXT,
-    review_comments TEXT,
-    plan_review_comments TEXT,
-    test_results TEXT,
-    agent_log TEXT,
-    current_agent TEXT,
-    plan_review_count INTEGER NOT NULL DEFAULT 0,
-    impl_review_count INTEGER NOT NULL DEFAULT 0,
-    level INTEGER NOT NULL DEFAULT 3,
-    attachments TEXT,
-    notes TEXT,
-    rank INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    started_at TEXT,
-    planned_at TEXT,
-    reviewed_at TEXT,
-    tested_at TEXT,
-    completed_at TEXT
-  );
-"
+sqlite3 ~/.claude/kanban.db "CREATE TABLE IF NOT EXISTS tasks (...);"
 ```
 
 ## .gitignore
 
-Choose whether to track the DB in git:
+Add to `.gitignore` (the DB lives centrally, not in the project):
 ```bash
-# To exclude (personal use):
-echo ".claude/kanban.db" >> .gitignore
-echo ".claude/kanban.db-wal" >> .gitignore
-echo ".claude/kanban.db-shm" >> .gitignore
+echo ".claude/kanban.json" >> .gitignore
+echo "kanban-board/" >> .gitignore
 ```
 
 ## Agent Workflow (Lifecycle Documentation)
@@ -907,9 +887,11 @@ curl -s -X POST http://localhost:5173/api/task/$ID/test-result \
 
 ## Web Board Viewer
 
-Run `/kanban-init` to scaffold the web board in any project. It creates a `kanban-board/` directory with all files.
+Run `/kanban-init` to register the project. Then start the central board:
 
 ```bash
-cd kanban-board && pnpm dev
+./kanban-board/start.sh
+# → http://localhost:5173/?project=<YOUR_PROJECT>
 ```
-Default port: 5173 (auto-increments if in use). Open the 7-column board (Req, Plan, Review Plan, Implement, Review Impl, Test, Done) with drag-and-drop (valid transitions only), card lifecycle modal with 7-step progress bar, add card form, agent log viewer, and 10s auto-refresh.
+
+Default port: 5173 (auto-increments if in use). All projects share one board — use the project dropdown or `?project=` URL param to filter. Features: 7-column pipeline, drag-and-drop (valid transitions only), card lifecycle modal, agent log viewer, 10s auto-refresh.
