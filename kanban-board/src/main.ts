@@ -174,6 +174,7 @@ function renderCard(task: Task): string {
         ${priorityBadge}
         ${statusBadge}
         ${agentBadge}
+        <button class="card-copy-btn" data-copy="#${task.id} ${task.title}" title="Copy to clipboard">⎘</button>
       </div>
       <div class="card-title">${task.title}</div>
       ${desc ? `<div class="card-desc">${desc}</div>` : ""}
@@ -846,7 +847,17 @@ async function loadBoard() {
       `${data.done.length}/${total} completed`;
 
     board.querySelectorAll(".card").forEach((el) => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", (e) => {
+        const copyBtn = (e.target as HTMLElement).closest(".card-copy-btn") as HTMLElement | null;
+        if (copyBtn) {
+          e.stopPropagation();
+          navigator.clipboard.writeText(copyBtn.dataset.copy!).then(() => {
+            const orig = copyBtn.textContent!;
+            copyBtn.textContent = "✓";
+            setTimeout(() => { copyBtn.textContent = orig; }, 1000);
+          });
+          return;
+        }
         const id = parseInt((el as HTMLElement).dataset.id!);
         const project = (el as HTMLElement).dataset.project;
         showTaskDetail(id, project);

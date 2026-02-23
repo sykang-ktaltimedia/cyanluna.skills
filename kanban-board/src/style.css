@@ -277,6 +277,28 @@ main#board.hidden {
   flex-wrap: wrap;
 }
 
+.card-copy-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.card:hover .card-copy-btn {
+  opacity: 1;
+}
+.card-copy-btn:hover {
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .card-id {
   font-size: 0.65rem;
   color: #64748b;
