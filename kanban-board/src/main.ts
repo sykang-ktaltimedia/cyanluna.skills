@@ -19,7 +19,6 @@ interface Task {
   level: number;
   attachments: string | null;
   notes: string | null;
-  decision_log: string | null;
   created_at: string;
   started_at: string | null;
   planned_at: string | null;
@@ -57,77 +56,17 @@ const STATUS_BADGES: Record<string, string> = {
   test:        "Testing",
 };
 
-let currentProject: string | null = null;
+// Read project from URL query parameter
+const urlParams = new URLSearchParams(window.location.search);
+let currentProject: string | null = urlParams.get("project");
 let isDragging = false;
 let currentView: "board" | "list" = "board";
-let currentSearch: string = '';
-let currentSort: string = 'default';
-let hideOldDone: boolean = false;
 
 function priorityClass(priority: string): string {
   if (priority === "high") return "high";
   if (priority === "medium") return "medium";
   if (priority === "low") return "low";
   return "";
-}
-
-function isOlderThan3Days(dateStr: string): boolean {
-  if (!dateStr) return false;
-  return Date.now() - new Date(dateStr).getTime() > 3 * 24 * 60 * 60 * 1000;
-}
-
-function sortTasks(tasks: Task[]): Task[] {
-  if (currentSort === 'default') return tasks;
-  return [...tasks].sort((a, b) => {
-    if (currentSort === 'created_asc')  return a.created_at.localeCompare(b.created_at);
-    if (currentSort === 'created_desc') return b.created_at.localeCompare(a.created_at);
-    if (currentSort === 'completed_desc') {
-      return (b.completed_at || '').localeCompare(a.completed_at || '');
-    }
-    return 0;
-  });
-}
-
-function applySearchFilter() {
-  const q = currentSearch.toLowerCase().replace(/^#/, '');
-  const anyFilter = q.length > 0 || hideOldDone;
-
-  if (currentView === 'board') {
-    document.querySelectorAll<HTMLElement>('.card').forEach(card => {
-      const searchOk = !q || (() => {
-        const id    = card.dataset.id || '';
-        const title = card.querySelector('.card-title')?.textContent?.toLowerCase() || '';
-        const desc  = card.querySelector('.card-desc')?.textContent?.toLowerCase() || '';
-        const tags  = [...card.querySelectorAll('.tag')].map(t => t.textContent?.toLowerCase() || '').join(' ');
-        return id === q || title.includes(q) || desc.includes(q) || tags.includes(q);
-      })();
-      const doneHidden = hideOldDone
-        && card.dataset.status === 'done'
-        && isOlderThan3Days(card.dataset.completedAt || '');
-      card.style.display = (searchOk && !doneHidden) ? '' : 'none';
-    });
-    // Update column counts: "visible/total" when any filter is active
-    document.querySelectorAll<HTMLElement>('.column').forEach(col => {
-      const cards   = col.querySelectorAll<HTMLElement>('.card');
-      const visible = [...cards].filter(c => c.style.display !== 'none').length;
-      const countEl = col.querySelector<HTMLElement>('.count');
-      if (countEl) countEl.textContent = anyFilter ? `${visible}/${cards.length}` : `${cards.length}`;
-    });
-  } else {
-    document.querySelectorAll<HTMLElement>('#list-view tbody tr').forEach(row => {
-      const searchOk = !q || (() => {
-        const id      = row.dataset.id || '';
-        const title   = row.querySelector('.col-title')?.textContent?.toLowerCase() || '';
-        const project = (row as HTMLTableRowElement).cells[5]?.textContent?.toLowerCase() || '';
-        const tags    = [...row.querySelectorAll('.tag')].map(t => t.textContent?.toLowerCase() || '').join(' ');
-        return id === q || title.includes(q) || project.includes(q) || tags.includes(q);
-      })();
-      const doneHidden = hideOldDone
-        && row.classList.contains('status-done')
-        && isOlderThan3Days(row.dataset.completedAt || '');
-      row.style.display = (searchOk && !doneHidden) ? '' : 'none';
-    });
-  }
 }
 
 function parseTags(tags: string | null): string[] {
@@ -230,14 +169,13 @@ function renderCard(task: Task): string {
     : "";
 
   return `
-    <div class="card" draggable="true" data-id="${task.id}" data-status="${task.status}" data-project="${task.project}" data-completed-at="${task.completed_at || ''}">
+    <div class="card" draggable="true" data-id="${task.id}" data-status="${task.status}">
       <div class="card-header">
         <span class="card-id">#${task.id}</span>
         ${levelBadge}
         ${priorityBadge}
         ${statusBadge}
         ${agentBadge}
-        <button class="card-copy-btn" data-copy="#${task.id} ${task.title}" title="Copy to clipboard">⎘</button>
       </div>
       <div class="card-title">${task.title}</div>
       ${desc ? `<div class="card-desc">${desc}</div>` : ""}
@@ -259,7 +197,7 @@ function renderColumn(
   icon: string,
   tasks: Task[]
 ): string {
-  const cardsHtml = sortTasks(tasks).map(renderCard).join("");
+  const cardsHtml = tasks.map(renderCard).join("");
   const addBtn = key === "todo"
     ? `<button class="add-card-btn" id="add-card-btn" title="Add card">+</button>`
     : "";
@@ -483,7 +421,7 @@ function renderTestEntries(results: any[]): string {
   `).join('');
 }
 
-async function uploadFiles(taskId: number, files: FileList | File[], project: string) {
+async function uploadFiles(taskId: number, files: FileList | File[]) {
   for (const file of Array.from(files)) {
     if (!file.type.startsWith("image/")) continue;
     const reader = new FileReader();
@@ -491,24 +429,23 @@ async function uploadFiles(taskId: number, files: FileList | File[], project: st
       reader.onload = () => resolve(reader.result as string);
       reader.readAsDataURL(file);
     });
-    await fetch(`/api/task/${taskId}/attachment?project=${encodeURIComponent(project)}`, {
+    await fetch(`/api/task/${taskId}/attachment`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename: file.name, data }),
     });
   }
-  showTaskDetail(taskId, project);
+  showTaskDetail(taskId);
 }
 
-async function showTaskDetail(id: number, project?: string) {
+async function showTaskDetail(id: number) {
   const overlay = document.getElementById("modal-overlay")!;
   const content = document.getElementById("modal-content")!;
   content.innerHTML = '<div style="color:#94a3b8">Loading...</div>';
   overlay.classList.remove("hidden");
 
   try {
-    const projectParam = project ? `?project=${encodeURIComponent(project)}` : "";
-    const res = await fetch(`/api/task/${id}${projectParam}`);
+    const res = await fetch(`/api/task/${id}`);
     const task: Task = await res.json();
 
     const tags = parseTags(task.tags);
@@ -612,15 +549,6 @@ async function showTaskDetail(id: number, project?: string) {
       'Plan', '\u{1F5FA}\uFE0F', 'phase-plan',
       task.plan, currentPhase === 1 && !task.plan
     );
-
-    // Decision Log section (after plan, before plan review)
-    let decisionLogSection = '';
-    if (task.decision_log) {
-      decisionLogSection = renderLifecycleSection(
-        'Decision Log', '🧭', 'phase-decision-log',
-        task.decision_log, false
-      );
-    }
 
     // Plan Review section
     const planReviewComments = parseJsonArray(task.plan_review_comments);
@@ -760,7 +688,6 @@ async function showTaskDetail(id: number, project?: string) {
       <div class="lifecycle-sections">
         ${requirementSection}
         ${planSection}
-        ${decisionLogSection}
         ${planReviewSection}
         ${implSection}
         ${reviewSection}
@@ -780,18 +707,18 @@ async function showTaskDetail(id: number, project?: string) {
     const levelSelect = document.getElementById("level-select") as HTMLSelectElement;
     levelSelect.addEventListener("change", async () => {
       const newLevel = parseInt(levelSelect.value);
-      await fetch(`/api/task/${id}?project=${encodeURIComponent(task.project)}`, {
+      await fetch(`/api/task/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ level: newLevel }),
       });
-      showTaskDetail(id, task.project);
+      showTaskDetail(id);
     });
 
     // Delete task handler
     document.getElementById("delete-task-btn")!.addEventListener("click", async () => {
       if (!confirm(`Delete card #${task.id} "${task.title}"?`)) return;
-      await fetch(`/api/task/${id}?project=${encodeURIComponent(task.project)}`, { method: "DELETE" });
+      await fetch(`/api/task/${id}`, { method: "DELETE" });
       document.getElementById("modal-overlay")!.classList.add("hidden");
       refreshCurrentView();
     });
@@ -819,12 +746,12 @@ async function showTaskDetail(id: number, project?: string) {
     reqSaveBtn.addEventListener("click", async () => {
       const newDesc = reqTextarea.value;
       reqSaveBtn.textContent = "Saving...";
-      await fetch(`/api/task/${id}?project=${encodeURIComponent(task.project)}`, {
+      await fetch(`/api/task/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ description: newDesc }),
       });
-      showTaskDetail(id, task.project);
+      showTaskDetail(id);
     });
 
     // Image attachment handlers
@@ -844,10 +771,10 @@ async function showTaskDetail(id: number, project?: string) {
         e.preventDefault();
         dropZone.classList.remove("drop-active");
         const files = (e as DragEvent).dataTransfer?.files;
-        if (files) await uploadFiles(id, files, task.project);
+        if (files) await uploadFiles(id, files);
       });
       fileInput.addEventListener("change", async () => {
-        if (fileInput.files) await uploadFiles(id, fileInput.files, task.project);
+        if (fileInput.files) await uploadFiles(id, fileInput.files);
       });
     }
 
@@ -858,10 +785,10 @@ async function showTaskDetail(id: number, project?: string) {
         const el = btn as HTMLElement;
         const taskId = el.dataset.id;
         const storedName = el.dataset.name;
-        await fetch(`/api/task/${taskId}/attachment/${encodeURIComponent(storedName!)}?project=${encodeURIComponent(task.project)}`, {
+        await fetch(`/api/task/${taskId}/attachment/${encodeURIComponent(storedName!)}`, {
           method: "DELETE",
         });
-        showTaskDetail(id, task.project);
+        showTaskDetail(id);
       });
     });
 
@@ -873,12 +800,12 @@ async function showTaskDetail(id: number, project?: string) {
       const text = noteInput.value.trim();
       if (!text) return;
       noteInput.disabled = true;
-      await fetch(`/api/task/${id}/note?project=${encodeURIComponent(task.project)}`, {
+      await fetch(`/api/task/${id}/note`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      showTaskDetail(id, task.project);
+      showTaskDetail(id);
     });
 
     // Note delete buttons
@@ -886,8 +813,8 @@ async function showTaskDetail(id: number, project?: string) {
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const noteId = (btn as HTMLElement).dataset.noteId;
-        await fetch(`/api/task/${id}/note/${noteId}?project=${encodeURIComponent(task.project)}`, { method: "DELETE" });
-        showTaskDetail(id, task.project);
+        await fetch(`/api/task/${id}/note/${noteId}`, { method: "DELETE" });
+        showTaskDetail(id);
       });
     });
   } catch {
@@ -920,25 +847,13 @@ async function loadBoard() {
       `${data.done.length}/${total} completed`;
 
     board.querySelectorAll(".card").forEach((el) => {
-      el.addEventListener("click", (e) => {
-        const copyBtn = (e.target as HTMLElement).closest(".card-copy-btn") as HTMLElement | null;
-        if (copyBtn) {
-          e.stopPropagation();
-          navigator.clipboard.writeText(copyBtn.dataset.copy!).then(() => {
-            const orig = copyBtn.textContent!;
-            copyBtn.textContent = "✓";
-            setTimeout(() => { copyBtn.textContent = orig; }, 1000);
-          });
-          return;
-        }
+      el.addEventListener("click", () => {
         const id = parseInt((el as HTMLElement).dataset.id!);
-        const project = (el as HTMLElement).dataset.project;
-        showTaskDetail(id, project);
+        showTaskDetail(id);
       });
     });
 
     setupDragAndDrop();
-    applySearchFilter();
 
     const addBtn = document.getElementById("add-card-btn");
     if (addBtn) {
@@ -976,22 +891,30 @@ async function loadListView() {
       }
     }
 
-    // Sort by selected mode (default: ID descending / newest first)
-    const displayTasks = currentSort === 'default'
-      ? [...allTasks].sort((a, b) => b.id - a.id)
-      : sortTasks(allTasks);
+    // Sort by ID descending (newest first)
+    allTasks.sort((a, b) => b.id - a.id);
 
-    const total = displayTasks.length;
-    const doneCount = displayTasks.filter(t => t.status === "done").length;
+    const total = allTasks.length;
+    const doneCount = allTasks.filter(t => t.status === "done").length;
     document.getElementById("count-summary")!.textContent =
       `${doneCount}/${total} completed`;
 
-    const rows = displayTasks.map(t => {
+    const statusOptions = COLUMNS.map(c =>
+      `<option value="${c.key}">${c.icon} ${c.label}</option>`
+    ).join("");
+    const levelOptions = [1, 2, 3].map(l =>
+      `<option value="${l}">L${l}</option>`
+    ).join("");
+    const priorityOptions = ["high", "medium", "low"].map(p =>
+      `<option value="${p}">${p[0].toUpperCase() + p.slice(1)}</option>`
+    ).join("");
+
+    const rows = allTasks.map(t => {
       const pClass = priorityClass(t.priority);
       const tags = parseTags(t.tags);
       const tagsHtml = tags.map(tag => `<span class="tag">${tag}</span>`).join("");
       return `
-        <tr class="status-${t.status}" data-id="${t.id}" data-project="${t.project}" data-completed-at="${t.completed_at || ''}">
+        <tr class="status-${t.status}" data-id="${t.id}">
           <td class="col-id">#${t.id}</td>
           <td class="col-title">${t.title}</td>
           <td>
@@ -1052,9 +975,7 @@ async function loadListView() {
         let value: string | number = el.value;
         if (field === "level") value = parseInt(value);
 
-        const row = el.closest("tr") as HTMLElement | null;
-        const project = row?.dataset.project || "";
-        const resp = await fetch(`/api/task/${taskId}?project=${encodeURIComponent(project)}`, {
+        const resp = await fetch(`/api/task/${taskId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ [field]: value }),
@@ -1074,14 +995,11 @@ async function loadListView() {
     listView.querySelectorAll(".col-title").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
-        const row = (el as HTMLElement).closest("tr")! as HTMLElement;
+        const row = (el as HTMLElement).closest("tr")!;
         const id = parseInt(row.dataset.id!);
-        const project = row.dataset.project;
-        showTaskDetail(id, project);
+        showTaskDetail(id);
       });
     });
-
-    applySearchFilter();
   } catch (err) {
     console.error("loadListView failed:", err);
     listView.innerHTML = `
@@ -1094,10 +1012,9 @@ async function loadListView() {
 
 function renderProjectFilter(projects: string[]) {
   const container = document.getElementById("project-filter")!;
-  if (projects.length <= 1) {
-    container.innerHTML = projects[0]
-      ? `<span class="project-label">${projects[0]}</span>`
-      : "";
+
+  if (projects.length === 0) {
+    container.innerHTML = `<span class="project-label">No projects</span>`;
     return;
   }
 
@@ -1110,14 +1027,18 @@ function renderProjectFilter(projects: string[]) {
 
   container.innerHTML = `
     <select id="project-select">
-      <option value="">All Projects</option>
       ${options}
     </select>
   `;
 
   document.getElementById("project-select")!.addEventListener("change", (e) => {
-    currentProject = (e.target as HTMLSelectElement).value || null;
-    refreshCurrentView();
+    const newProject = (e.target as HTMLSelectElement).value;
+    if (newProject && newProject !== currentProject) {
+      // Update URL and reload with new project
+      const url = new URL(window.location.href);
+      url.searchParams.set("project", newProject);
+      window.location.href = url.toString();
+    }
   });
 }
 
@@ -1153,9 +1074,8 @@ function setupDragAndDrop() {
   cards.forEach((card) => {
     card.addEventListener("dragstart", (e) => {
       const ev = e as DragEvent;
-      const cardEl = card as HTMLElement;
-      ev.dataTransfer!.setData("text/plain", `${cardEl.dataset.project}:${cardEl.dataset.id}`);
-      cardEl.classList.add("dragging");
+      ev.dataTransfer!.setData("text/plain", (card as HTMLElement).dataset.id!);
+      (card as HTMLElement).classList.add("dragging");
       isDragging = true;
     });
     card.addEventListener("dragend", () => {
@@ -1176,7 +1096,7 @@ function setupDragAndDrop() {
     col.addEventListener("dragleave", (e) => {
       const colEl = col as HTMLElement;
       // Only remove if actually leaving the column (not entering a child)
-      if (!colEl.contains((e as DragEvent).relatedTarget as Node)) {
+      if (!colEl.contains(e.relatedTarget as Node)) {
         colEl.classList.remove("drag-over");
         clearDropIndicators();
       }
@@ -1188,10 +1108,7 @@ function setupDragAndDrop() {
       clearDropIndicators();
 
       const ev = e as DragEvent;
-      const dragData = ev.dataTransfer!.getData("text/plain");
-      const colonIdx = dragData.lastIndexOf(":");
-      const dragProject = colonIdx >= 0 ? dragData.slice(0, colonIdx) : "";
-      const id = parseInt(colonIdx >= 0 ? dragData.slice(colonIdx + 1) : dragData);
+      const id = parseInt(ev.dataTransfer!.getData("text/plain"));
       const newStatus = colEl.dataset.column!;
       const beforeCard = getInsertBeforeCard(colEl, ev.clientY);
 
@@ -1210,7 +1127,7 @@ function setupDragAndDrop() {
         afterId = parseInt((cardsInCol[cardsInCol.length - 1] as HTMLElement).dataset.id!);
       }
 
-      const resp = await fetch(`/api/task/${id}/reorder?project=${encodeURIComponent(dragProject)}`, {
+      const resp = await fetch(`/api/task/${id}/reorder`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: newStatus, afterId, beforeId }),
@@ -1240,15 +1157,13 @@ function showToast(message: string) {
 }
 
 // Set tab title to project name
-fetch("/api/info")
-  .then((r) => r.json())
-  .then((info: { projectName: string }) => {
-    if (info.projectName) {
-      document.title = `Kanban \u00b7 ${info.projectName}`;
-      document.querySelector("header h1")!.textContent = `Kanban \u00b7 ${info.projectName}`;
-    }
-  })
-  .catch(() => {});
+if (currentProject) {
+  document.title = `Kanban · ${currentProject}`;
+  document.querySelector("header h1")!.textContent = `Kanban · ${currentProject}`;
+} else {
+  document.title = "Kanban · Select Project";
+  document.querySelector("header h1")!.textContent = "Kanban";
+}
 
 function switchView(view: "board" | "list") {
   currentView = view;
@@ -1277,8 +1192,52 @@ function refreshCurrentView() {
   else loadListView();
 }
 
-// Init
-loadBoard();
+// Init - check if project is specified
+if (!currentProject) {
+  // Show project selection page
+  fetch("/api/projects")
+    .then((r) => r.json())
+    .then((data: { projects: string[] }) => {
+      const board = document.getElementById("board")!;
+      if (data.projects.length === 0) {
+        board.innerHTML = `
+          <div style="grid-column:1/-1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px;color:#666">
+            <h2 style="margin-bottom:16px">No Projects Found</h2>
+            <p>Run <code>/kanban-init</code> in a project directory to create a kanban board.</p>
+          </div>
+        `;
+      } else if (data.projects.length === 1) {
+        // Auto-redirect to the only project
+        window.location.href = `?project=${encodeURIComponent(data.projects[0])}`;
+      } else {
+        board.innerHTML = `
+          <div style="grid-column:1/-1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px">
+            <h2 style="margin-bottom:24px;color:#333">Select a Project</h2>
+            <div style="display:flex;flex-wrap:wrap;gap:12px;justify-content:center">
+              ${data.projects.map(p => `
+                <a href="?project=${encodeURIComponent(p)}"
+                   style="padding:16px 24px;background:#f5f5f5;border-radius:8px;text-decoration:none;color:#333;font-weight:500;transition:background 0.2s"
+                   onmouseover="this.style.background='#e0e0e0'"
+                   onmouseout="this.style.background='#f5f5f5'">
+                  ${p}
+                </a>
+              `).join("")}
+            </div>
+          </div>
+        `;
+      }
+      document.getElementById("count-summary")!.textContent = `${data.projects.length} projects`;
+    })
+    .catch(() => {
+      document.getElementById("board")!.innerHTML = `
+        <div style="grid-column:1/-1;display:flex;align-items:center;justify-content:center;color:#ef4444;padding:48px">
+          Failed to load projects
+        </div>
+      `;
+    });
+} else {
+  loadBoard();
+}
 
 // Tab switching
 document.getElementById("tab-board")!.addEventListener("click", () => switchView("board"));
@@ -1296,25 +1255,6 @@ setInterval(() => {
 
 // Refresh button
 document.getElementById("refresh-btn")!.addEventListener("click", refreshCurrentView);
-
-// Search — DOM filter, no API re-fetch
-document.getElementById("search-input")!.addEventListener("input", (e) => {
-  currentSearch = (e.target as HTMLInputElement).value.trim();
-  applySearchFilter();
-});
-
-// Sort — requires re-render
-document.getElementById("sort-select")!.addEventListener("change", (e) => {
-  currentSort = (e.target as HTMLSelectElement).value;
-  refreshCurrentView();
-});
-
-// Hide old done toggle
-document.getElementById("hide-done-btn")!.addEventListener("click", () => {
-  hideOldDone = !hideOldDone;
-  document.getElementById("hide-done-btn")!.classList.toggle("active", hideOldDone);
-  applySearchFilter();
-});
 
 // Close modal
 document.getElementById("modal-close")!.addEventListener("click", () => {
@@ -1412,11 +1352,7 @@ document.getElementById("add-card-form")!.addEventListener("submit", async (e) =
   const tagsRaw = (document.getElementById("add-tags") as HTMLInputElement).value.trim();
   const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean) : null;
 
-  const project = currentProject;
-  if (!project) {
-    showToast("Select a project first");
-    return;
-  }
+  const project = currentProject || undefined;
 
   const submitBtn = document.querySelector("#add-card-form .form-submit") as HTMLButtonElement;
   submitBtn.textContent = pendingFiles.length > 0 ? "Creating..." : "Add Card";
@@ -1431,7 +1367,7 @@ document.getElementById("add-card-form")!.addEventListener("submit", async (e) =
 
   // Upload pending attachments
   if (pendingFiles.length > 0 && result.id) {
-    await uploadFiles(result.id, pendingFiles as any, project);
+    await uploadFiles(result.id, pendingFiles as any);
   }
 
   pendingFiles = [];
