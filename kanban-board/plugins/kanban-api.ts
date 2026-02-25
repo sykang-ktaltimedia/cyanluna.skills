@@ -144,6 +144,18 @@ function getDb(project?: string): Database.Database {
   try {
     db.exec(`ALTER TABLE tasks ADD COLUMN notes TEXT`);
   } catch { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE tasks ADD COLUMN started_at TEXT`);
+  } catch { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE tasks ADD COLUMN decision_log TEXT`);
+  } catch { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE tasks ADD COLUMN updated_at TEXT DEFAULT ''`);
+  } catch { /* column already exists */ }
+
+  // Backfill updated_at for existing rows
+  db.exec(`UPDATE tasks SET updated_at = COALESCE(completed_at, reviewed_at, started_at, created_at, datetime('now')) WHERE updated_at = '' OR updated_at IS NULL`);
 
   // Ensure images directory exists (per-project)
   const imagesDir = path.join(KANBAN_DBS_DIR, `${project}-images`);

@@ -62,6 +62,11 @@ let currentProject: string | null = urlParams.get("project");
 let isDragging = false;
 let currentView: "board" | "list" = "board";
 
+function apiUrl(path: string): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return currentProject ? `${path}${sep}project=${encodeURIComponent(currentProject)}` : path;
+}
+
 function priorityClass(priority: string): string {
   if (priority === "high") return "high";
   if (priority === "medium") return "medium";
@@ -429,7 +434,7 @@ async function uploadFiles(taskId: number, files: FileList | File[]) {
       reader.onload = () => resolve(reader.result as string);
       reader.readAsDataURL(file);
     });
-    await fetch(`/api/task/${taskId}/attachment`, {
+    await fetch(apiUrl(`/api/task/${taskId}/attachment`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename: file.name, data }),
@@ -445,7 +450,7 @@ async function showTaskDetail(id: number) {
   overlay.classList.remove("hidden");
 
   try {
-    const res = await fetch(`/api/task/${id}`);
+    const res = await fetch(apiUrl(`/api/task/${id}`));
     const task: Task = await res.json();
 
     const tags = parseTags(task.tags);
@@ -707,7 +712,7 @@ async function showTaskDetail(id: number) {
     const levelSelect = document.getElementById("level-select") as HTMLSelectElement;
     levelSelect.addEventListener("change", async () => {
       const newLevel = parseInt(levelSelect.value);
-      await fetch(`/api/task/${id}`, {
+      await fetch(apiUrl(`/api/task/${id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ level: newLevel }),
@@ -718,7 +723,7 @@ async function showTaskDetail(id: number) {
     // Delete task handler
     document.getElementById("delete-task-btn")!.addEventListener("click", async () => {
       if (!confirm(`Delete card #${task.id} "${task.title}"?`)) return;
-      await fetch(`/api/task/${id}`, { method: "DELETE" });
+      await fetch(apiUrl(`/api/task/${id}`), { method: "DELETE" });
       document.getElementById("modal-overlay")!.classList.add("hidden");
       refreshCurrentView();
     });
@@ -746,7 +751,7 @@ async function showTaskDetail(id: number) {
     reqSaveBtn.addEventListener("click", async () => {
       const newDesc = reqTextarea.value;
       reqSaveBtn.textContent = "Saving...";
-      await fetch(`/api/task/${id}`, {
+      await fetch(apiUrl(`/api/task/${id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ description: newDesc }),
@@ -785,7 +790,7 @@ async function showTaskDetail(id: number) {
         const el = btn as HTMLElement;
         const taskId = el.dataset.id;
         const storedName = el.dataset.name;
-        await fetch(`/api/task/${taskId}/attachment/${encodeURIComponent(storedName!)}`, {
+        await fetch(apiUrl(`/api/task/${taskId}/attachment/${encodeURIComponent(storedName!)}`), {
           method: "DELETE",
         });
         showTaskDetail(id);
@@ -800,7 +805,7 @@ async function showTaskDetail(id: number) {
       const text = noteInput.value.trim();
       if (!text) return;
       noteInput.disabled = true;
-      await fetch(`/api/task/${id}/note`, {
+      await fetch(apiUrl(`/api/task/${id}/note`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
@@ -813,7 +818,7 @@ async function showTaskDetail(id: number) {
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const noteId = (btn as HTMLElement).dataset.noteId;
-        await fetch(`/api/task/${id}/note/${noteId}`, { method: "DELETE" });
+        await fetch(apiUrl(`/api/task/${id}/note/${noteId}`), { method: "DELETE" });
         showTaskDetail(id);
       });
     });
@@ -824,10 +829,9 @@ async function showTaskDetail(id: number) {
 
 async function loadBoard() {
   const board = document.getElementById("board")!;
-  const params = currentProject ? `?project=${encodeURIComponent(currentProject)}` : "";
 
   try {
-    const res = await fetch(`/api/board${params}`);
+    const res = await fetch(apiUrl(`/api/board`));
     const data: Board = await res.json();
 
     renderProjectFilter(data.projects);
@@ -875,10 +879,9 @@ async function loadBoard() {
 
 async function loadListView() {
   const listView = document.getElementById("list-view")!;
-  const params = currentProject ? `?project=${encodeURIComponent(currentProject)}` : "";
 
   try {
-    const res = await fetch(`/api/board${params}`);
+    const res = await fetch(apiUrl(`/api/board`));
     const data: Board = await res.json();
 
     renderProjectFilter(data.projects);
@@ -975,7 +978,7 @@ async function loadListView() {
         let value: string | number = el.value;
         if (field === "level") value = parseInt(value);
 
-        const resp = await fetch(`/api/task/${taskId}`, {
+        const resp = await fetch(apiUrl(`/api/task/${taskId}`), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ [field]: value }),
@@ -1127,7 +1130,7 @@ function setupDragAndDrop() {
         afterId = parseInt((cardsInCol[cardsInCol.length - 1] as HTMLElement).dataset.id!);
       }
 
-      const resp = await fetch(`/api/task/${id}/reorder`, {
+      const resp = await fetch(apiUrl(`/api/task/${id}/reorder`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: newStatus, afterId, beforeId }),
@@ -1358,7 +1361,7 @@ document.getElementById("add-card-form")!.addEventListener("submit", async (e) =
   submitBtn.textContent = pendingFiles.length > 0 ? "Creating..." : "Add Card";
   submitBtn.disabled = true;
 
-  const res = await fetch("/api/task", {
+  const res = await fetch(apiUrl("/api/task"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title, priority, level, description, tags, project }),

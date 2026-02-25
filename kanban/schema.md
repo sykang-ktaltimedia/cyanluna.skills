@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   decision_log TEXT,
   rank INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT '',
   started_at TEXT,
   planned_at TEXT,
   reviewed_at TEXT,
